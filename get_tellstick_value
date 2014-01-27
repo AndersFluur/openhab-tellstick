@@ -1,0 +1,43 @@
+#!/bin/bash
+# return the value for the ID in the first argument. The second argument indicates what to
+# return. I.e Temperature (temp) or humidity (humid)
+
+IdIn=$1
+What=$2
+
+usage()
+{
+	echo "Usage: $0 <Id> [humid | temp]"
+	exit 1
+} 
+
+
+if [ $# -ne 2 ] || [ -z "$IdIn" ] || [ -z "$What" ]; then
+	usage
+	exit 1
+fi
+
+while IFS=" " read Type Id RestOfLine 
+  do
+#     echo "Type=$Type"
+#     echo "id=$Id"
+     if [ "$Type" = "temperaturehumidity" ]; then
+	read  Temperature  Humidity Date Time < <(echo $RestOfLine)
+	if [ "$What" == "humid" -a "$IdIn" == "$Id" ]; then
+		echo $Humidity
+		exit 0
+	fi
+        if [ "$What" == "temp" -a "$IdIn" == "$Id" ]; then
+                echo $Temperature
+                exit 0
+        fi
+     fi
+     if [ "$Type" = "temperature" ]; then
+        read  Temperature Date Time < <(echo $RestOfLine)
+        if [ "$What" == "temp" -a "$IdIn" == "$Id" ]; then
+                echo $Temperature
+                exit 0
+        fi
+     fi
+  done < <(tdtool -l | egrep -e "mandolyn|fineoffset" | awk '{print $2,$3,$4,$5,$6,$7}' | sed -e 's#\xb0###' -e 's#\xc2###' -e 's#%###')
+ exit 1
