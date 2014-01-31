@@ -1,0 +1,51 @@
+#!/bin/bash -e
+
+# Simple script to do installation and uninstallation.
+# A bad excuse for not doing a proper package
+
+# Make sure only root can run our script
+if [ "$(id -u)" != "0" ]; then
+   echo "This script must be run as root" 1>&2
+   exit 1
+fi
+
+PackageName=openhab_tellstick
+Destination=/opt/$PackageName
+DestinationBin=$Destination/bin
+InitDir=/etc/init.d
+
+errExit()
+{
+    echo "$1"
+    exit 1
+}
+
+
+doInstall()
+{
+    install -d "$DestinationBin"
+    cp ./openhab_tellstick $InitDir
+    chmod 755 $InitDir/openhab_tellstick
+    update-rc.d openhab_tellstick defaults
+    cp ./openhab_tellstick_inbound $DestinationBin
+    service openhab_tellstick start
+}
+doUnInstall()
+{
+    service openhab_tellstick stop
+    update-rc.d -f  openhab_tellstick remove
+    rm -rf "$Destination"
+    rm $InitDir/openhab_tellstick
+}
+
+set -x
+if [ "$1" == "install" ]; then
+    doInstall
+elif [ "$1" == "uninstall" ]; then
+    doUnInstall
+else
+    errExit "Option '$1' not supported"
+fi
+
+
+
