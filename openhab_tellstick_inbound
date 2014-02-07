@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-# Script taken from the wiki of Openhab. This script is uses the tellcore python binding
+# Script taken from the wiki of Openhab and  modified. This script is uses the tellcore python binding
 # from https://pypi.python.org/pypi/tellcore-py
 #
 # This script listens for events from Tellstick Duo and updates openhab via its REST 
@@ -18,6 +18,7 @@
 # A type value of 2 is humidity.
 
 
+import argparse
 import sys
 import time
 
@@ -25,9 +26,7 @@ import time
 import tellcore.telldus as td
 from tellcore.constants import *
 
-
 import httplib
-
 
 openhab = "localhost:8080"
 headers = {"Content-type": "text/plain"}
@@ -45,9 +44,13 @@ METHODS = {TELLSTICK_TURNON: 'ON',
            TELLSTICK_DOWN: 'down',
            TELLSTICK_STOP: 'stop'}
 
+def print_verbose(what):
+    if  args['verbose']:
+        print(what)
 
 def raw_event(data, controller_id, cid):
-    string = "[RAW] {0} <- {1}".format(controller_id, data)
+#class:command;protocol:waveman;model:codeswitch;house:A;unit:1;method:turnoff;
+    string = "[RAW] {0} <- {1} cid={2}".format(controller_id, data, cid)
     print(string)
 
 
@@ -56,40 +59,82 @@ def device_event(id_, method, data, cid):
     string = "[DEVICE] {0} -> {1}".format(id_, method_string)
     if method == TELLSTICK_DIM:
         string += " [{0}]".format(data)
-#    print("device_event")
-#    print("string",string)
+#    print_verbose("device_event"
+#    print_verbose("string",string)
     url = "/rest/items/td_device_{0}/state".format(id_)
-    print(url)
-#    print("method_string",method_string)
+    print_verbose(url)
+#    print_verbose("method_string",method_string)
     try:
         conn = httplib.HTTPConnection(openhab)
         conn.request('PUT', url, method_string, headers)
     except:
-        print(connErr)
+        print_verbose(connErr)
 
 
 def sensor_event(protocol, model, id_, dataType, value, timestamp, cid):
     string = "[SENSOR] {0} [{1}/{2}] ({3}) @ {4} <- {5}".format(
         id_, protocol, model, dataType, timestamp, value)
-#    print("string=",string)
+#    print_verbose("string=",string)
     url = "/rest/items/td_sensor_{0}_{1}_{2}/state".format(protocol, id_, dataType)
     value2 = "{0}".format(value)
-    print(url, value2)
+    print_verbose(url, value2)
     try:
         conn = httplib.HTTPConnection(openhab)
         conn.request('PUT', url, value2, headers)
     except:
-        print(connErr)
+        print_verbose(connErr)
 
+
+parser = argparse.ArgumentParser(description='Listen for Tellstick events and process the events according to various ways depending on the users'' whiches')
+
+parser.add_argument(
+    '--all', action='store_true', help='Trace all events')
+parser.add_argument(
+    '--device', action='store_true', help='Trace device events')
+parser.add_argument(
+    '--change', action='store_true', help='Trace device change events')
+parser.add_argument(
+    '--raw', action='store_true', help='Print_Verbose raw events. If possible, use tellstick.conf')
+parser.add_argument(
+    '--sensor', action='store_true', help='Trace sensor events')
+parser.add_argument(
+    '--controller', action='store_true', help='Trace controller events')
+parser.add_argument(
+    '-v', '--verbose',  action='store_true', help='send to [openhab stdout]')
+args = vars(parser.parse_args())
 
 core = td.TelldusCore()
 callbacks = []
 
 
-callbacks.append(core.register_device_event(device_event))
-callbacks.append(core.register_raw_device_event(raw_event))
-callbacks.append(core.register_sensor_event(sensor_event))
 
+print_verbose("args={0}".format(args))
+for arg in args:
+    print("arg={0}".format(arg))
+    if not (args[arg] or args['all']):
+        continue
+    try:
+        if arg == 'device':
+            callbacks.append(core.register_device_event(device_event))
+        elif arg == 'change':
+            callbacks.append(
+                core.register_device_change_event(device_change_event))
+        elif arg == 'raw':
+            callbacks.append(core.register_raw_device_event(raw_event))
+        elif arg == 'sensor': 
+            callbacks.append(core.register_sensor_event(sensor_event))
+        elif arg == 'controller':
+            callbacks.append(core.register_controller_event(controller_event))
+        else:
+            assert arg == 'all' or arg == 'verbose'
+    except AttributeError:
+        if not args['all']:
+            raise
+
+if len(callbacks) == 0:
+    print("Must enable at least one event")
+    parser.print_usage()
+    sys.exit(1)
 
 try:
     while True:

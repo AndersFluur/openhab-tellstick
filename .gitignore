@@ -19,3 +19,7 @@
 
 # Temporary files
 *~
+tmp
+
+# enacs temp file
+\#*\#

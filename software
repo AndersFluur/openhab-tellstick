@@ -13,13 +13,26 @@ PackageName=openhab_tellstick
 Destination=/opt/$PackageName
 DestinationBin=$Destination/bin
 InitDir=/etc/init.d
-
+usage()
+{
+    echo "$0 [ install|update|uninstall ]
+}
 errExit()
 {
     echo "$1"
+    echo
+    usage
     exit 1
 }
 
+doUpdate()
+{
+    service openhab_tellstick stop
+    cp ./openhab_tellstick $InitDir
+    chmod 755 $InitDir/openhab_tellstick
+    cp ./openhab_tellstick_inbound $DestinationBin
+    service openhab_tellstick start
+}
 
 doInstall()
 {
@@ -38,11 +51,14 @@ doUnInstall()
     rm $InitDir/openhab_tellstick
 }
 
-set -x
+#set -x
 if [ "$1" == "install" ]; then
     doInstall
 elif [ "$1" == "uninstall" ]; then
     doUnInstall
+elif [ "$1" == "update" ]; then
+    doUpdate
+
 else
     errExit "Option '$1' not supported"
 fi
