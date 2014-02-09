@@ -17,21 +17,13 @@
 # 1 is the type which is = temperature in this example.
 # A type value of 2 is humidity.
 
-
 import argparse
 import sys
 import time
 
-
 import tellcore.telldus as td
 from tellcore.constants import *
-
 import httplib
-
-openhab = "localhost:8080"
-headers = {"Content-type": "text/plain"}
-connErr = "No connection to openhab on http://" + openhab
-
 
 METHODS = {TELLSTICK_TURNON: 'ON',
            TELLSTICK_TURNOFF: 'OFF',
@@ -48,10 +40,38 @@ def print_verbose(what):
     if  args['verbose']:
         print(what)
 
+def send_event(url,value):
+    openhab = "localhost:8080"
+    headers = {"Content-type": "text/plain"}
+    connErr = "No connection to openhab on http://" + openhab
+    print_verbose("url="+"value="+value)
+    try:
+        conn = httplib.HTTPConnection(openhab)
+        conn.request('PUT', url, value, headers)
+    except:
+        print_verbose(connErr)
+
+def raw_event_to_device_config(raw):
+#raw="class:command;protocol:waveman;model:codeswitch;house:A;unit:1;method:turnoff;"
+    list1=raw.split(';')
+    list2=[x.split(':') for x in list1]
+    event_dict={x[0]: x[1] for x in list2}
+    if event_dict['class'] == 'command':
+        print("device  {")
+        print("  id       = \"{}\"".format(len(core.devices())+1))
+        print("  name     = \"\"")
+        print("  protocol = \"{}\"".format(event_dict['protocol']))
+        print("  model    = \"{}\"".format(event_dict['model']))
+        print("  parameters {")
+        print("    house   = \"{}\"".format(event_dict['house']))
+        print("    unit    = \"{}\"".format(event_dict['unit']))
+        print("  }")
+        print("}")
+
 def raw_event(data, controller_id, cid):
-#class:command;protocol:waveman;model:codeswitch;house:A;unit:1;method:turnoff;
     string = "[RAW] {0} <- {1} cid={2}".format(controller_id, data, cid)
     print(string)
+    raw_event_to_device_config(raw)
 
 
 def device_event(id_, method, data, cid):
@@ -59,61 +79,72 @@ def device_event(id_, method, data, cid):
     string = "[DEVICE] {0} -> {1}".format(id_, method_string)
     if method == TELLSTICK_DIM:
         string += " [{0}]".format(data)
-#    print_verbose("device_event"
-#    print_verbose("string",string)
     url = "/rest/items/td_device_{0}/state".format(id_)
-    print_verbose(url)
-#    print_verbose("method_string",method_string)
-    try:
-        conn = httplib.HTTPConnection(openhab)
-        conn.request('PUT', url, method_string, headers)
-    except:
-        print_verbose(connErr)
+    send_event(url,method_string)
+
+def device_change_event(id_, event, type_, cid):
+    event_string = EVENTS.get(event, "UNKNOWN EVENT {0}".format(event))
+    string = "[DEVICE_CHANGE] {0} {1}".format(event_string, id_)
+    if event == const.TELLSTICK_DEVICE_CHANGED:
+        type_string = CHANGES.get(type_, "UNKNOWN CHANGE {0}".format(type_))
+        string += " [{0}]".format(type_string)
+    print("NOT IMPL! Device change event not sent to openhab"+string)
+
+
+# Controller events are not supported before 2.1.2 something ...
+def controller_event(id_, event, type_, new_value, cid):
+    event_string = EVENTS.get(event, "UNKNOWN EVENT {0}".format(event))
+    string = "[CONTROLLER] {0} {1}".format(event_string, id_)
+    if event == const.TELLSTICK_DEVICE_ADDED:
+        type_string = TYPES.get(type_, "UNKNOWN TYPE {0}".format(type_))
+        string += " {0}".format(type_string)
+    elif (event == const.TELLSTICK_DEVICE_CHANGED
+          or event == const.TELLSTICK_DEVICE_STATE_CHANGED):
+        type_string = CHANGES.get(type_, "UNKNOWN CHANGE {0}".format(type_))
+        string += " [{0}] -> {1}".format(type_string, new_value)
+    print("NOT IMPL! Controller event not sent to openhab"+string)
 
 
 def sensor_event(protocol, model, id_, dataType, value, timestamp, cid):
     string = "[SENSOR] {0} [{1}/{2}] ({3}) @ {4} <- {5}".format(
         id_, protocol, model, dataType, timestamp, value)
-#    print_verbose("string=",string)
     url = "/rest/items/td_sensor_{0}_{1}_{2}/state".format(protocol, id_, dataType)
     value2 = "{0}".format(value)
-    print_verbose(url, value2)
-    try:
-        conn = httplib.HTTPConnection(openhab)
-        conn.request('PUT', url, value2, headers)
-    except:
-        print_verbose(connErr)
-
+    send_event(url,value2)
 
 parser = argparse.ArgumentParser(description='Listen for Tellstick events and process the events according to various ways depending on the users'' whiches')
 
 parser.add_argument(
-    '--all', action='store_true', help='Trace all events')
+    '-v', '--verbose',  action='store_true', help='print what is happening')
 parser.add_argument(
-    '--device', action='store_true', help='Trace device events')
-parser.add_argument(
-    '--change', action='store_true', help='Trace device change events')
-parser.add_argument(
-    '--raw', action='store_true', help='Print_Verbose raw events. If possible, use tellstick.conf')
-parser.add_argument(
-    '--sensor', action='store_true', help='Trace sensor events')
-parser.add_argument(
-    '--controller', action='store_true', help='Trace controller events')
-parser.add_argument(
-    '-v', '--verbose',  action='store_true', help='send to [openhab stdout]')
+    '-e','--events', nargs='*',choices=['all','device','change','raw','sensor','controller'], help='Which events to report. Raw events are only printed')
 args = vars(parser.parse_args())
 
-core = td.TelldusCore()
+try:
+    import asyncio
+    loop = asyncio.get_event_loop()
+    dispatcher = td.AsyncioCallbackDispatcher(loop)
+    core = td.TelldusCore(callback_dispatcher=dispatcher)
+except ImportError:
+    loop = None
+    core = td.TelldusCore()
+
 callbacks = []
 
 
 
 print_verbose("args={0}".format(args))
-for arg in args:
-    print("arg={0}".format(arg))
-    if not (args[arg] or args['all']):
-        continue
-    try:
+if 'all' in args['events']:
+    print("Listening for all events")
+    callbacks.append(core.register_device_event(device_event))
+    callbacks.append(core.register_device_change_event(device_change_event))
+    callbacks.append(core.register_raw_device_event(raw_event))
+    callbacks.append(core.register_sensor_event(sensor_event))
+#"Controller events are not supported before 2.1.2")
+#    callbacks.append(core.register_controller_event(controller_event))
+else:
+    for arg in args['events']:
+        print("Listening for "+arg+" events")
         if arg == 'device':
             callbacks.append(core.register_device_event(device_event))
         elif arg == 'change':
@@ -124,21 +155,22 @@ for arg in args:
         elif arg == 'sensor': 
             callbacks.append(core.register_sensor_event(sensor_event))
         elif arg == 'controller':
-            callbacks.append(core.register_controller_event(controller_event))
-        else:
-            assert arg == 'all' or arg == 'verbose'
-    except AttributeError:
-        if not args['all']:
-            raise
+            print("Controller events are not supported before 2.1.2")
+            #callbacks.append(core.register_controller_event(controller_event))
 
 if len(callbacks) == 0:
     print("Must enable at least one event")
     parser.print_usage()
     sys.exit(1)
 
+
 try:
-    while True:
-        core.process_pending_callbacks()
-        time.sleep(0.5)
+    if loop:
+        loop.run_forever()
+    else:
+        import time
+        while True:
+            core.callback_dispatcher.process_pending_callbacks()
+            time.sleep(0.5)
 except KeyboardInterrupt:
     pass

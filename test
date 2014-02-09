@@ -1,0 +1,6 @@
+def openhab_send_event(url):
+    try:
+        conn = httplib.HTTPConnection(openhab)
+        conn.request('PUT', url, method_string, headers)
+    except:
+        print(connErr)
