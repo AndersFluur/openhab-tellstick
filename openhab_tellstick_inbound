@@ -22,19 +22,38 @@ import sys
 import time
 
 import tellcore.telldus as td
+import tellcore.constants as const
+
 from tellcore.constants import *
 import httplib
 
-METHODS = {TELLSTICK_TURNON: 'ON',
-           TELLSTICK_TURNOFF: 'OFF',
-           TELLSTICK_BELL: 'BELL',
-           TELLSTICK_TOGGLE: 'toggle',
-           TELLSTICK_DIM: 'dim',
-           TELLSTICK_LEARN: 'learn',
-           TELLSTICK_EXECUTE: 'execute',
-           TELLSTICK_UP: 'up',
-           TELLSTICK_DOWN: 'down',
-           TELLSTICK_STOP: 'stop'}
+
+METHODS = {const.TELLSTICK_TURNON: 'turn on',
+           const.TELLSTICK_TURNOFF: 'turn off',
+           const.TELLSTICK_BELL: 'bell',
+           const.TELLSTICK_TOGGLE: 'toggle',
+           const.TELLSTICK_DIM: 'dim',
+           const.TELLSTICK_LEARN: 'learn',
+           const.TELLSTICK_EXECUTE: 'execute',
+           const.TELLSTICK_UP: 'up',
+           const.TELLSTICK_DOWN: 'down',
+           const.TELLSTICK_STOP: 'stop'}
+
+EVENTS = {const.TELLSTICK_DEVICE_ADDED: "added",
+          const.TELLSTICK_DEVICE_REMOVED: "removed",
+          const.TELLSTICK_DEVICE_CHANGED: "changed",
+          const.TELLSTICK_DEVICE_STATE_CHANGED: "state changed"}
+
+CHANGES = {const.TELLSTICK_CHANGE_NAME: "name",
+           const.TELLSTICK_CHANGE_PROTOCOL: "protocol",
+           const.TELLSTICK_CHANGE_MODEL: "model",
+           const.TELLSTICK_CHANGE_METHOD: "method",
+           const.TELLSTICK_CHANGE_AVAILABLE: "available",
+           const.TELLSTICK_CHANGE_FIRMWARE: "firmware"}
+
+TYPES = {const.TELLSTICK_CONTROLLER_TELLSTICK: 'tellstick',
+         const.TELLSTICK_CONTROLLER_TELLSTICK_DUO: "tellstick duo",
+         const.TELLSTICK_CONTROLLER_TELLSTICK_NET: "tellstick net"}
 
 def print_verbose(what):
     if  args['verbose']:
@@ -53,8 +72,9 @@ def send_event(url,value):
 
 def raw_event_to_device_config(raw):
 #raw="class:command;protocol:waveman;model:codeswitch;house:A;unit:1;method:turnoff;"
-    list1=raw.split(';')
-    list2=[x.split(':') for x in list1]
+    list1=raw[0:-1].split(';') # Remove trailing ';' and split into 'name':value
+    list2=[x.split(':') for x in list1] # 
+    print('list2: {}'.format(list2))
     event_dict={x[0]: x[1] for x in list2}
     if event_dict['class'] == 'command':
         print("device  {")
@@ -71,13 +91,13 @@ def raw_event_to_device_config(raw):
 def raw_event(data, controller_id, cid):
     string = "[RAW] {0} <- {1} cid={2}".format(controller_id, data, cid)
     print(string)
-    raw_event_to_device_config(raw)
+    raw_event_to_device_config(data)
 
 
 def device_event(id_, method, data, cid):
     method_string = METHODS.get(method, "UNKNOWN STATE {0}".format(method))
     string = "[DEVICE] {0} -> {1}".format(id_, method_string)
-    if method == TELLSTICK_DIM:
+    if method == const.TELLSTICK_DIM:
         string += " [{0}]".format(data)
     url = "/rest/items/td_device_{0}/state".format(id_)
     send_event(url,method_string)
@@ -127,7 +147,11 @@ try:
     core = td.TelldusCore(callback_dispatcher=dispatcher)
 except ImportError:
     loop = None
-    core = td.TelldusCore()
+    dispatcher = td.QueuedCallbackDispatcher()
+
+
+
+core = td.TelldusCore(callback_dispatcher=dispatcher)
 
 callbacks = []
 
@@ -140,8 +164,7 @@ if 'all' in args['events']:
     callbacks.append(core.register_device_change_event(device_change_event))
     callbacks.append(core.register_raw_device_event(raw_event))
     callbacks.append(core.register_sensor_event(sensor_event))
-#"Controller events are not supported before 2.1.2")
-#    callbacks.append(core.register_controller_event(controller_event))
+    callbacks.append(core.register_controller_event(controller_event))
 else:
     for arg in args['events']:
         print("Listening for "+arg+" events")
@@ -156,21 +179,23 @@ else:
             callbacks.append(core.register_sensor_event(sensor_event))
         elif arg == 'controller':
             print("Controller events are not supported before 2.1.2")
-            #callbacks.append(core.register_controller_event(controller_event))
+            callbacks.append(core.register_controller_event(controller_event))
 
 if len(callbacks) == 0:
     print("Must enable at least one event")
     parser.print_usage()
     sys.exit(1)
 
-
 try:
     if loop:
         loop.run_forever()
+        print('looping')
     else:
+        print('busy looping')
         import time
         while True:
             core.callback_dispatcher.process_pending_callbacks()
             time.sleep(0.5)
 except KeyboardInterrupt:
     pass
+
