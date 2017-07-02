@@ -1,18 +1,13 @@
 #!/usr/bin/env python
 
-# Script taken from the wiki of Openhab and  modified. This script is uses the tellcore python binding
+# This script taken from the wiki of Openhab and  modified. It uses the tellcore python binding
 # from https://pypi.python.org/pypi/tellcore-py
 #
-# This script listens for events from Tellstick Duo and updates openhab via its REST 
-# interface.
-# Note that in order to receive events from remote controls a matching device entry
-# must be present in /etc/tellstick.conf
-# If not present the event will be printed as "raw" event and will be thrown away and not
-# reach Openhab.
+# Listening for events from Tellstick Duo and publishes MQTT events to a server.
 #
-# Openhab items must be named td_device_<Id>, where <Id> is the device id from 
+# Devices are named td_device_<Id>, where <Id> is the device id from
 # /etc/tellstick.conf
-# Temperature and humidity probes are identified as Items in Openhab as:
+# Temperature and humidity probes are identified as:
 # td_sensor_mandolyn_11_1 , where mandolyn is the protocol, 11 is the device identity and
 # 1 is the type which is = temperature in this example.
 # A type value of 2 is humidity.
@@ -28,8 +23,7 @@ from tellcore.constants import *
 import httplib
 import paho.mqtt.client as mqtt
 
-
-METHODS = {const.TELLSTICK_TURNON: 'turn on',
+METHOD = {const.TELLSTICK_TURNON: 'turn on',
            const.TELLSTICK_TURNOFF: 'turn off',
            const.TELLSTICK_BELL: 'bell',
            const.TELLSTICK_TOGGLE: 'toggle',
@@ -56,161 +50,207 @@ TYPES = {const.TELLSTICK_CONTROLLER_TELLSTICK: 'tellstick',
          const.TELLSTICK_CONTROLLER_TELLSTICK_DUO: "tellstick duo",
          const.TELLSTICK_CONTROLLER_TELLSTICK_NET: "tellstick net"}
 
-def print_verbose(what):
-    if  args['verbose']:
-        print(what)
+class TellStickPubSub:
 
-def send_event(url,value):
-    openhab = "localhost:8080"
-    headers = {"Content-type": "text/plain"}
-    connErr = "No connection to openhab on http://" + openhab
-    print_verbose("url="+"value="+value)
-    try:
-        conn = httplib.HTTPConnection(openhab)
-        conn.request('PUT', url, value, headers)
-    except:
-        print_verbose(connErr)
+    def init(self):
+        self.parser = argparse.ArgumentParser(description='Listen for Tellstick events and process the events according to various ways depending on the users'' whishes')
 
-def raw_event_to_device_config(raw):
-#raw="class:command;protocol:waveman;model:codeswitch;house:A;unit:1;method:turnoff;"
-    list1=raw[0:-1].split(';') # Remove trailing ';' and split into 'name':value
-    list2=[x.split(':') for x in list1] # 
-    print('list2: {}'.format(list2))
-    event_dict={x[0]: x[1] for x in list2}
-    if event_dict['class'] == 'command':
-        print("device  {")
-        print("  id       = \"{}\"".format(len(core.devices())+1))
-        print("  name     = \"\"")
-        print("  protocol = \"{}\"".format(event_dict['protocol']))
-        print("  model    = \"{}\"".format(event_dict['model']))
-        print("  parameters {")
-        print("    house   = \"{}\"".format(event_dict['house']))
-        print("    unit    = \"{}\"".format(event_dict['unit']))
-        print("  }")
-        print("}")
+        self.parser.add_argument(
+            '-v', '--verbose',  action='store_true', help='print what is happening')
+        self.parser.add_argument(
+            '-e','--events', nargs='*',choices=['all','device','change','raw','sensor','controller'], help='Which events to report. Raw events are only printed')
+        self.parser.add_argument(
+            '-d', '--host', required=True, help='host to publish mqtt events to')
+        self.parser.add_argument(
+            '-p', '--port', type=int, default=1883, help='mqtt port')
+        self.parser.add_argument(
+            '-r', '--report_if', choices=['http', 'mqtt'], default='mqtt', help='Where to subscribe and report events')
 
-def raw_event(data, controller_id, cid):
-    string = "[RAW] {0} <- {1} cid={2}".format(controller_id, data, cid)
-    print(string)
-    raw_event_to_device_config(data)
+        #args = vars(parser.parse_args())
+        self.args = self.parser.parse_args()
 
+    def run(self):
+        if self.args.report_if == 'mqtt':
+            self.mqttClient = mqtt.Client()
+            self.mqttClient.on_connect = self.on_connect
+            self.mqttClient.on_disconnect = self.on_disconnect
+            self.mqttClient.connect(self.args.host, port=self.args.port, keepalive=60, bind_address="")
 
-def device_event(id_, method, data, cid):
-    method_string = METHODS.get(method, "UNKNOWN STATE {0}".format(method))
-    string = "[DEVICE] {0} -> {1}".format(id_, method_string)
-    if method == const.TELLSTICK_DIM:
-        string += " [{0}]".format(data)
-    url = "/rest/items/td_device_{0}/state".format(id_)
-    send_event(url,method_string)
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            dispatcher = td.AsyncioCallbackDispatcher(loop)
+            core = td.TelldusCore(callback_dispatcher=dispatcher)
+        except ImportError:
+            loop = None
+            dispatcher = td.QueuedCallbackDispatcher()
+            core = td.TelldusCore(callback_dispatcher=dispatcher)
 
-def device_change_event(id_, event, type_, cid):
-    event_string = EVENTS.get(event, "UNKNOWN EVENT {0}".format(event))
-    string = "[DEVICE_CHANGE] {0} {1}".format(event_string, id_)
-    if event == const.TELLSTICK_DEVICE_CHANGED:
-        type_string = CHANGES.get(type_, "UNKNOWN CHANGE {0}".format(type_))
-        string += " [{0}]".format(type_string)
-    print("NOT IMPL! Device change event not sent to openhab"+string)
+        callbacks = []
 
+        self.print_verbose("args={0}".format(self.args))
+        if 'all' in self.args.events:
+            print("Listening for all events")
+            callbacks.append(core.register_device_event(self.device_event))
+            callbacks.append(core.register_device_change_event(self.device_change_event))
+            callbacks.append(core.register_raw_device_event(self.raw_event))
+            callbacks.append(core.register_sensor_event(self.sensor_event))
+            callbacks.append(core.register_controller_event(self.controller_event))
+        else:
+            for arg in self.args.events:
+                print("Listening for "+arg+" events")
+                if arg == 'device':
+                    callbacks.append(core.register_device_event(self.device_event))
+                elif arg == 'change':
+                    callbacks.append(
+                        core.register_device_change_event(self.device_change_event))
+                elif arg == 'raw':
+                    callbacks.append(core.register_raw_device_event(self.raw_event))
+                elif arg == 'sensor':
+                    callbacks.append(core.register_sensor_event(self.sensor_event))
+                elif arg == 'controller':
+                    print("Controller events are not supported before 2.1.2")
+                    callbacks.append(core.register_controller_event(self.controller_event))
 
-# Controller events are not supported before 2.1.2 something ...
-def controller_event(id_, event, type_, new_value, cid):
-    event_string = EVENTS.get(event, "UNKNOWN EVENT {0}".format(event))
-    string = "[CONTROLLER] {0} {1}".format(event_string, id_)
-    if event == const.TELLSTICK_DEVICE_ADDED:
-        type_string = TYPES.get(type_, "UNKNOWN TYPE {0}".format(type_))
-        string += " {0}".format(type_string)
-    elif (event == const.TELLSTICK_DEVICE_CHANGED
-          or event == const.TELLSTICK_DEVICE_STATE_CHANGED):
-        type_string = CHANGES.get(type_, "UNKNOWN CHANGE {0}".format(type_))
-        string += " [{0}] -> {1}".format(type_string, new_value)
-    print("NOT IMPL! Controller event not sent to openhab"+string)
+        if len(callbacks) == 0:
+            print("Must enable at least one event")
+            self.parser.print_usage()
+            sys.exit(1)
 
-
-def sensor_event(protocol, model, id_, dataType, value, timestamp, cid):
-    string = "[SENSOR] {0} [{1}/{2}] ({3}) @ {4} <- {5}".format(
-        id_, protocol, model, dataType, timestamp, value)
-    url = "/rest/items/td_sensor_{0}_{1}_{2}/state".format(protocol, id_, dataType)
-    value2 = "{0}".format(value)
-    send_event(url,value2)
-
-# MQTT callbacks
-def on_connect(client, userdata, rc):
-    print("Connection returned result: "+connack_string(rc))
-
-def on_disconnect(client, userdata, rc):
-    if rc != 0:
-        print("Unexpected disconnection.")
+        try:
+            if loop:
+                loop.run_forever()
+                print('looping')
+            else:
+                print('busy looping')
+                import time
+                while True:
+                    self.mqttClient.loop(timeout=1.0)
+                    self.print_verbose('busy looping ....')
+                    core.callback_dispatcher.process_pending_callbacks()
+                    time.sleep(0.5)
+        except KeyboardInterrupt:
+            pass
 
 
-parser = argparse.ArgumentParser(description='Listen for Tellstick events and process the events according to various ways depending on the users'' whiches')
+    def print_verbose(self, what):
+        if  self.args.verbose:
+            print(what)
 
-parser.add_argument(
-    '-v', '--verbose',  action='store_true', help='print what is happening')
-parser.add_argument(
-    '-e','--events', nargs='*',choices=['all','device','change','raw','sensor','controller'], help='Which events to report. Raw events are only printed')
-args = vars(parser.parse_args())
 
-mqttc = mqtt.Client()
-host =  '192.168.1.40'
-mqttc.on_connect = on_connect
-mqttc.on_disconnect = on_disconnect
-mqttc.connect_async(host, port=1883, keepalive=60, bind_address="")
+    def send_event(self, url, value):
+        if self.args.report_if == 'mqtt':
+            self.send_event_mqtt(url,value)
+        elif self.args.report_if == 'http':
+            self.send_event_http(url,value)
+        else:
+            print("Must enable -r (report_if)")
+            self.parser.print_usage()
+            sys.exit(1)
 
+    def send_event_http(self, url, value):
+        openhab = "localhost:8080"
+        headers = {"Content-type": "text/plain"}
+        connErr = "No connection to openhab on http://" + openhab
+        self.print_verbose("url="+"value="+value)
+        try:
+            conn = httplib.HTTPConnection(openhab)
+            conn.request('PUT', url, value, headers)
+        except:
+            self.print_verbose(connErr)
+
+    def send_event_mqtt(self, url, value):
+        connErr = "No connection to mqtt. host: {} Port: {}".format(self.args.host, self.args.port)
+        #try:
+        (result, mid) = self.mqttClient.publish(topic=url, payload=value, qos=0, retain=False)
+        #except:
+        #self.print_verbose(connErr)
+        print("url: {} value: {} result: {} mid: {}".format(url, value, result, mid))
+
+    def raw_event_to_device_config(self, raw):
+    #raw="class:command;protocol:waveman;model:codeswitch;house:A;unit:1;method:turnoff;"
+        list1=raw[0:-1].split(';') # Remove trailing ';' and split into 'name':value
+        list2=[x.split(':') for x in list1] #
+        print('list2: {}'.format(list2))
+        event_dict={x[0]: x[1] for x in list2}
+        if event_dict['class'] == 'command':
+            print("device  {")
+            print("  id       = \"{}\"".format(len(core.devices())+1))
+            print("  name     = \"\"")
+            print("  protocol = \"{}\"".format(event_dict['protocol']))
+            print("  model    = \"{}\"".format(event_dict['model']))
+            print("  parameters {")
+            print("    house   = \"{}\"".format(event_dict['house']))
+            print("    unit    = \"{}\"".format(event_dict['unit']))
+            print("  }")
+            print("}")
+
+    def raw_event(self, data, controller_id, cid):
+        string = "[RAW] {0} <- {1} cid={2}".format(controller_id, data, cid)
+        print(string)
+        raw_event_to_device_config(data)
+
+
+    def device_event(self, id_, method, data, cid):
+        method_string = METHODS.get(method, "UNKNOWN STATE {0}".format(method))
+        string = "[DEVICE] {0} -> {1}".format(id_, method_string)
+        if method == const.TELLSTICK_DIM:
+            string += " [{0}]".format(data)
+        url = "/rest/items/td_device_{0}/state".format(id_)
+        self.send_event(url,method_string)
+
+    def device_change_event(self, id_, event, type_, cid):
+        event_string = EVENTS.get(event, "UNKNOWN EVENT {0}".format(event))
+        string = "[DEVICE_CHANGE] {0} {1}".format(event_string, id_)
+        if event == const.TELLSTICK_DEVICE_CHANGED:
+            type_string = CHANGES.get(type_, "UNKNOWN CHANGE {0}".format(type_))
+            string += " [{0}]".format(type_string)
+        print("NOT IMPL! Device change event not sent to openhab"+string)
+
+
+    # Controller events are not supported before 2.1.2 something ...
+    def controller_event(self, id_, event, type_, new_value, cid):
+        event_string = EVENTS.get(event, "UNKNOWN EVENT {0}".format(event))
+        string = "[CONTROLLER] {0} {1}".format(event_string, id_)
+        if event == const.TELLSTICK_DEVICE_ADDED:
+            type_string = TYPES.get(type_, "UNKNOWN TYPE {0}".format(type_))
+            string += " {0}".format(type_string)
+        elif (event == const.TELLSTICK_DEVICE_CHANGED
+              or event == const.TELLSTICK_DEVICE_STATE_CHANGED):
+            type_string = CHANGES.get(type_, "UNKNOWN CHANGE {0}".format(type_))
+            string += " [{0}] -> {1}".format(type_string, new_value)
+        print("NOT IMPL! Controller event not sent to openhab"+string)
+
+    def toTellstickSensorType(self, type):
+        if type == 1:
+            return 'temperature'
+	if type == 2:
+	    return 'humidity'
+	return 'unknowntype'
+
+
+    def sensor_event(self, protocol, model, id_, dataType, value, timestamp, cid):
+        string = "[SENSOR] {0} [{1}/{2}] ({3}) @ {4} <- {5}".format(
+            id_, protocol, model, dataType, timestamp, value)
+        url = "/sensor/{0}/{1}/{2}".format(protocol, id_, self.toTellstickSensorType(dataType))
+        value2 = "{0}".format(value)
+        self.send_event(url,value2)
+
+    # MQTT callbacks
+    def on_connect(self, client, userdata, flags, rc):
+        print("Connection returned result: "+ str(rc))
+
+    def on_disconnect(self, client, userdata, rc):
+        if rc != 0:
+            print("Unexpected disconnection.")
+
+# End class TellStickPubSub
+
+tellStickPubSub = TellStickPubSub()
 try:
-    import asyncio
-    loop = asyncio.get_event_loop()
-    dispatcher = td.AsyncioCallbackDispatcher(loop)
-    core = td.TelldusCore(callback_dispatcher=dispatcher)
-except ImportError:
-    loop = None
-    dispatcher = td.QueuedCallbackDispatcher()
-    core = td.TelldusCore(callback_dispatcher=dispatcher)
-
-callbacks = []
-
-
-
-print_verbose("args={0}".format(args))
-if 'all' in args['events']:
-    print("Listening for all events")
-    callbacks.append(core.register_device_event(device_event))
-    callbacks.append(core.register_device_change_event(device_change_event))
-    callbacks.append(core.register_raw_device_event(raw_event))
-    callbacks.append(core.register_sensor_event(sensor_event))
-    callbacks.append(core.register_controller_event(controller_event))
-else:
-    for arg in args['events']:
-        print("Listening for "+arg+" events")
-        if arg == 'device':
-            callbacks.append(core.register_device_event(device_event))
-        elif arg == 'change':
-            callbacks.append(
-                core.register_device_change_event(device_change_event))
-        elif arg == 'raw':
-            callbacks.append(core.register_raw_device_event(raw_event))
-        elif arg == 'sensor': 
-            callbacks.append(core.register_sensor_event(sensor_event))
-        elif arg == 'controller':
-            print("Controller events are not supported before 2.1.2")
-            callbacks.append(core.register_controller_event(controller_event))
-
-if len(callbacks) == 0:
-    print("Must enable at least one event")
-    parser.print_usage()
-    sys.exit(1)
-
-try:
-    if loop:
-        loop.run_forever()
-        print('looping')
-    else:
-        print('busy looping')
-        import time
-        while True:
-            mqttc.loop(timeout=1.0)
-            print('busy looping ....')
-            core.callback_dispatcher.process_pending_callbacks()
-            time.sleep(0.5)
-except KeyboardInterrupt:
     pass
-
+except Exception as e:
+    raise
+finally:
+    tellStickPubSub.init()
+    tellStickPubSub.run()
